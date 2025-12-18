@@ -6,7 +6,7 @@ use std::process::Command;
 
 #[derive(Parser, Debug)]
 #[command(name = "git-stats")]
-#[command(about = "Generate git commit statistics per contributor")]
+#[command(about = "Generate git commit statistics per contributor (commits & lines changed)")]
 struct Args {
     #[arg(short, long, help = "Branch to analyze")]
     branch: Option<String>,
@@ -17,17 +17,20 @@ struct Args {
     #[arg(short, long, help = "End date (e.g., 2025-12-31)")]
     until: Option<String>,
 
-    #[arg(short, long, action = clap::ArgAction::Append, help = "Merge authors (format: Alias=CanonicalName)")]
+    #[arg(short, long, action = clap::ArgAction::Append, help = "Merge authors (format: Alias1,Alias2 into first name)")]
     merge: Vec<String>,
 
     #[arg(short, long, help = "Show visual graph of contributions")]
     graph: bool,
 
-    #[arg(long, help = "Generate HTML report (GitHub-style)")]
+    #[arg(long, help = "Generate HTML report with commits/lines toggle, period selector, and charts")]
     html: Option<Option<String>>,
 
     #[arg(short, long, help = "Open HTML report after generation (optionally specify app, e.g. 'Safari', 'Firefox')")]
     open: Option<Option<String>>,
+
+    #[arg(long, help = "Sort by: commits (default) or lines")]
+    sort: Option<String>,
 }
 
 struct ContributorStats {
@@ -861,8 +864,17 @@ fn main() {
         entry.lines_deleted += deleted;
     }
 
+    let sort_by_lines = args.sort.as_deref() == Some("lines");
     let mut sorted_stats: Vec<(&String, &ContributorStats)> = stats_by_canonical.iter().collect();
-    sorted_stats.sort_by(|a, b| b.1.commits.cmp(&a.1.commits));
+    if sort_by_lines {
+        sorted_stats.sort_by(|a, b| {
+            let a_lines = a.1.lines_added + a.1.lines_deleted;
+            let b_lines = b.1.lines_added + b.1.lines_deleted;
+            b_lines.cmp(&a_lines)
+        });
+    } else {
+        sorted_stats.sort_by(|a, b| b.1.commits.cmp(&a.1.commits));
+    }
 
     println!("Branch: {}", branch);
     println!();
