@@ -967,11 +967,11 @@ fn main() {
         );
 
         for (name, stat) in &sorted_stats {
-            let lines = stat.lines_added + stat.lines_deleted;
-            let pct = if total_lines > 0 {
-                (lines as f64 / total_lines as f64) * 100.0
+            let pct = if sort_by_lines {
+                let lines = stat.lines_added + stat.lines_deleted;
+                if total_lines > 0 { (lines as f64 / total_lines as f64) * 100.0 } else { 0.0 }
             } else {
-                0.0
+                if total_commits > 0 { (stat.commits as f64 / total_commits as f64) * 100.0 } else { 0.0 }
             };
             println!(
                 "| {:<name_width$} | {:>8} | {:>15} | {:>17} | {:>5.1}% |",
