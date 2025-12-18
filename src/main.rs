@@ -200,6 +200,61 @@ fn get_commits_by_date(
     counts
 }
 
+fn get_lines_by_date(
+    branch: &str,
+    author: Option<&str>,
+    since: &Option<String>,
+    until: &Option<String>,
+) -> BTreeMap<String, u64> {
+    let mut args = vec![
+        "log".to_string(),
+        branch.to_string(),
+        "--format=%ad".to_string(),
+        "--date=short".to_string(),
+        "--numstat".to_string(),
+    ];
+
+    if let Some(a) = author {
+        args.push(format!("--author={}", a));
+    }
+    if let Some(s) = since {
+        args.push(format!("--since={}", s));
+    }
+    if let Some(u) = until {
+        args.push(format!("--until={}", u));
+    }
+
+    let output = Command::new("git")
+        .args(&args)
+        .output()
+        .expect("Failed to execute git log");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+    let mut current_date: Option<String> = None;
+
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Date lines are in format YYYY-MM-DD
+        if trimmed.len() == 10 && trimmed.chars().nth(4) == Some('-') && trimmed.chars().nth(7) == Some('-') {
+            current_date = Some(trimmed.to_string());
+        } else if let Some(ref date) = current_date {
+            // numstat lines: added<tab>deleted<tab>filename
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            if parts.len() >= 2 {
+                if let (Ok(added), Ok(deleted)) = (parts[0].parse::<u64>(), parts[1].parse::<u64>()) {
+                    *counts.entry(date.clone()).or_insert(0) += added + deleted;
+                }
+            }
+        }
+    }
+
+    counts
+}
+
 fn print_time_graph(title: &str, data: &BTreeMap<String, u64>) {
     if data.is_empty() {
         println!("{}: No data", title);
@@ -269,8 +324,10 @@ fn generate_html_report(
         map
     };
 
-    let mut weekly_data: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
-    let mut total_weekly: BTreeMap<String, u64> = BTreeMap::new();
+    let mut weekly_commits: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
+    let mut weekly_lines: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
+    let mut total_weekly_commits: BTreeMap<String, u64> = BTreeMap::new();
+    let mut total_weekly_lines: BTreeMap<String, u64> = BTreeMap::new();
 
     for (canonical_name, _) in sorted_stats {
         let mut authors_to_query: Vec<&str> = vec![canonical_name.as_str()];
@@ -280,15 +337,22 @@ fn generate_html_report(
             }
         }
 
-        let mut combined_data: BTreeMap<String, u64> = BTreeMap::new();
+        let mut combined_commits: BTreeMap<String, u64> = BTreeMap::new();
+        let mut combined_lines: BTreeMap<String, u64> = BTreeMap::new();
         for author in authors_to_query {
-            let data = get_commits_by_date(branch, Some(author), since, until);
-            for (date, count) in data {
-                *combined_data.entry(date.clone()).or_insert(0) += count;
-                *total_weekly.entry(date).or_insert(0) += count;
+            let commits_data = get_commits_by_date(branch, Some(author), since, until);
+            for (date, count) in commits_data {
+                *combined_commits.entry(date.clone()).or_insert(0) += count;
+                *total_weekly_commits.entry(date).or_insert(0) += count;
+            }
+            let lines_data = get_lines_by_date(branch, Some(author), since, until);
+            for (date, count) in lines_data {
+                *combined_lines.entry(date.clone()).or_insert(0) += count;
+                *total_weekly_lines.entry(date).or_insert(0) += count;
             }
         }
-        weekly_data.insert(canonical_name.to_string(), combined_data);
+        weekly_commits.insert(canonical_name.to_string(), combined_commits);
+        weekly_lines.insert(canonical_name.to_string(), combined_lines);
     }
 
     let colors = ["#58a6ff", "#3fb950", "#f0883e", "#a371f7", "#f85149", "#8b949e"];
@@ -297,8 +361,15 @@ fn generate_html_report(
         .iter()
         .enumerate()
         .map(|(i, (name, stats))| {
-            let weekly = weekly_data.get(*name).cloned().unwrap_or_default();
-            let weekly_json: String = weekly
+            let commits = weekly_commits.get(*name).cloned().unwrap_or_default();
+            let commits_json: String = commits
+                .iter()
+                .map(|(date, count)| format!("{{\"date\":\"{}\",\"count\":{}}}", date, count))
+                .collect::<Vec<_>>()
+                .join(",");
+
+            let lines = weekly_lines.get(*name).cloned().unwrap_or_default();
+            let lines_json: String = lines
                 .iter()
                 .map(|(date, count)| format!("{{\"date\":\"{}\",\"count\":{}}}", date, count))
                 .collect::<Vec<_>>()
@@ -311,19 +382,27 @@ fn generate_html_report(
                     "added": {},
                     "deleted": {},
                     "color": "{}",
-                    "weekly": [{}]
+                    "weeklyCommits": [{}],
+                    "weeklyLines": [{}]
                 }}"#,
                 name,
                 stats.commits,
                 stats.lines_added,
                 stats.lines_deleted,
                 colors[i % colors.len()],
-                weekly_json
+                commits_json,
+                lines_json
             )
         })
         .collect();
 
-    let total_weekly_json: String = total_weekly
+    let total_weekly_commits_json: String = total_weekly_commits
+        .iter()
+        .map(|(date, count)| format!("{{\"date\":\"{}\",\"count\":{}}}", date, count))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let total_weekly_lines_json: String = total_weekly_lines
         .iter()
         .map(|(date, count)| format!("{{\"date\":\"{}\",\"count\":{}}}", date, count))
         .collect::<Vec<_>>()
@@ -435,13 +514,19 @@ fn generate_html_report(
 
         <div class="card">
             <div class="card-header">
-                <div class="card-title" style="margin-bottom: 0;">Commits over time</div>
-                <div class="period-toggle">
-                    <button class="active" data-period="1">1 Day</button>
-                    <button data-period="3">3 Days</button>
-                    <button data-period="7">1 Week</button>
-                    <button data-period="30">1 Month</button>
-                    <button data-period="365">1 Year</button>
+                <div class="card-title" style="margin-bottom: 0;" id="chartTitle">Commits over time</div>
+                <div style="display: flex; gap: 16px;">
+                    <div class="period-toggle metric-toggle">
+                        <button class="active" data-metric="commits">Commits</button>
+                        <button data-metric="lines">Lines</button>
+                    </div>
+                    <div class="period-toggle">
+                        <button class="active" data-period="1">1 Day</button>
+                        <button data-period="3">3 Days</button>
+                        <button data-period="7">1 Week</button>
+                        <button data-period="30">1 Month</button>
+                        <button data-period="365">1 Year</button>
+                    </div>
                 </div>
             </div>
             <div class="main-chart">
@@ -453,13 +538,25 @@ fn generate_html_report(
     </div>
 
     <script>
-    const totalWeekly = [{total_weekly_json}];
+    const totalWeeklyCommits = [{total_weekly_commits_json}];
+    const totalWeeklyLines = [{total_weekly_lines_json}];
     const contributors = [{contributors_json}];
 
-    // Calculate global bounds
-    const allDates = totalWeekly.map(d => d.date).sort();
+    // Calculate global bounds from both datasets
+    const allCommitDates = totalWeeklyCommits.map(d => d.date);
+    const allLinesDates = totalWeeklyLines.map(d => d.date);
+    const allDates = [...new Set([...allCommitDates, ...allLinesDates])].sort();
     const globalMinDate = allDates[0];
     const globalMaxDate = allDates[allDates.length - 1];
+
+    // Current metric state
+    let currentMetric = 'commits';
+    const getTotalWeekly = () => currentMetric === 'commits' ? totalWeeklyCommits : totalWeeklyLines;
+    const getContribWeekly = (contrib) => currentMetric === 'commits' ? contrib.weeklyCommits : contrib.weeklyLines;
+
+    // Calculate totals for percentages
+    const totalCommits = contributors.reduce((sum, c) => sum + c.commits, 0);
+    const totalLines = contributors.reduce((sum, c) => sum + c.added + c.deleted, 0);
 
     // Aggregation function
     function aggregateByPeriod(data, days) {{
@@ -504,7 +601,7 @@ fn generate_html_report(
 
     // Calculate max for current period
     function getGlobalMax(period) {{
-        const totalAgg = aggregateByPeriod(totalWeekly, period);
+        const totalAgg = aggregateByPeriod(getTotalWeekly(), period);
         return Math.max(...totalAgg.map(d => d.y), 1);
     }}
 
@@ -513,15 +610,15 @@ fn generate_html_report(
 
     // Main chart - stacked area with all contributors (reversed: smallest at bottom, largest at top)
     const mainCtx = document.getElementById('mainChart').getContext('2d');
-    const allDatesForPeriod = (period) => aggregateByPeriod(totalWeekly, period).map(d => d.x);
+    const allDatesForPeriod = (period) => aggregateByPeriod(getTotalWeekly(), period).map(d => d.x);
     const contributorsReversed = [...contributors].reverse();
     const mainDatasets = contributorsReversed.map((contrib, i) => ({{
         label: contrib.name,
-        data: fillToAllDates(aggregateByPeriod(contrib.weekly, 1), allDatesForPeriod(1)),
+        data: fillToAllDates(aggregateByPeriod(getContribWeekly(contrib), 1), allDatesForPeriod(1)),
         borderColor: contrib.color,
         backgroundColor: contrib.color + '80',
         fill: 'origin',
-        tension: 0.2,
+        tension: 0.03,
         pointRadius: 0,
         pointHoverRadius: 4,
         pointHoverBackgroundColor: contrib.color,
@@ -550,7 +647,7 @@ fn generate_html_report(
                     displayColors: true,
                     callbacks: {{
                         title: (items) => items[0]?.label || '',
-                        label: (item) => `${{item.dataset.label}}: ${{item.parsed.y}} commits`
+                        label: (item) => `${{item.dataset.label}}: ${{item.parsed.y}} ${{currentMetric === 'commits' ? 'commits' : 'lines'}}`
                     }}
                 }}
             }},
@@ -586,7 +683,8 @@ fn generate_html_report(
                 <div class="contributor-info">
                     <h3>${{contrib.name}}</h3>
                     <div class="contributor-stats">
-                        ${{contrib.commits.toLocaleString()}} commits &nbsp;
+                        <span id="metric-${{index}}">${{contrib.commits.toLocaleString()}} commits</span>
+                        <span id="percent-${{index}}" style="color: #8b949e; margin-left: 8px;">${{(contrib.commits / totalCommits * 100).toFixed(1)}}%</span> &nbsp;
                         <span class="added">${{contrib.added.toLocaleString()}} ++</span> &nbsp;
                         <span class="deleted">${{contrib.deleted.toLocaleString()}} --</span>
                     </div>
@@ -599,7 +697,7 @@ fn generate_html_report(
         `;
         grid.appendChild(card);
 
-        const contribData = fillToAllDates(aggregateByPeriod(contrib.weekly, 1), allDatesForPeriod(1));
+        const contribData = fillToAllDates(aggregateByPeriod(getContribWeekly(contrib), 1), allDatesForPeriod(1));
 
         // Mini chart
         const chart = new Chart(document.getElementById(`chart-${{index}}`).getContext('2d'), {{
@@ -610,7 +708,7 @@ fn generate_html_report(
                     borderColor: contrib.color,
                     backgroundColor: contrib.color + '20',
                     fill: true,
-                    tension: 0.2,
+                    tension: 0.03,
                     pointRadius: 0,
                     pointHoverRadius: 5,
                     pointHoverBackgroundColor: contrib.color,
@@ -636,7 +734,7 @@ fn generate_html_report(
                         displayColors: false,
                         callbacks: {{
                             title: (items) => items[0]?.label || '',
-                            label: (item) => `${{item.parsed.y}} commits`
+                            label: (item) => `${{item.parsed.y}} ${{currentMetric === 'commits' ? 'commits' : 'lines'}}`
                         }}
                     }}
                 }},
@@ -670,13 +768,13 @@ fn generate_html_report(
 
         // Update main chart (all contributor datasets)
         contributorsReversed.forEach((contrib, i) => {{
-            mainChart.data.datasets[i].data = fillToAllDates(aggregateByPeriod(contrib.weekly, period), dates);
+            mainChart.data.datasets[i].data = fillToAllDates(aggregateByPeriod(getContribWeekly(contrib), period), dates);
         }});
         mainChart.update();
 
         // Update contributor charts
         contribCharts.forEach(({{ chart, contrib }}) => {{
-            const newData = fillToAllDates(aggregateByPeriod(contrib.weekly, period), dates);
+            const newData = fillToAllDates(aggregateByPeriod(getContribWeekly(contrib), period), dates);
             chart.data.datasets[0].data = newData;
             chart.options.scales.y.max = globalMax;
             chart.options.scales.y.min = -globalMax * 0.05;
@@ -684,21 +782,46 @@ fn generate_html_report(
         }});
     }}
 
-    // Toggle button click handlers
-    document.querySelectorAll('.period-toggle button').forEach(btn => {{
+    // Period toggle button click handlers
+    document.querySelectorAll('.period-toggle:not(.metric-toggle) button').forEach(btn => {{
         btn.addEventListener('click', () => {{
-            document.querySelectorAll('.period-toggle button').forEach(b => b.classList.remove('active'));
+            document.querySelectorAll('.period-toggle:not(.metric-toggle) button').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
             updateCharts(parseInt(btn.dataset.period));
         }});
     }});
+
+    // Metric toggle button click handlers
+    document.querySelectorAll('.metric-toggle button').forEach(btn => {{
+        btn.addEventListener('click', () => {{
+            document.querySelectorAll('.metric-toggle button').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            currentMetric = btn.dataset.metric;
+            document.getElementById('chartTitle').textContent = currentMetric === 'commits' ? 'Commits over time' : 'Lines changed over time';
+            // Update contributor card stats and percentages
+            contributors.forEach((contrib, index) => {{
+                const value = currentMetric === 'commits' ? contrib.commits : (contrib.added + contrib.deleted);
+                const total = currentMetric === 'commits' ? totalCommits : totalLines;
+                const percent = (value / total * 100).toFixed(1);
+                const label = currentMetric === 'commits' ? 'commits' : 'lines';
+                document.getElementById(`metric-${{index}}`).textContent = `${{value.toLocaleString()}} ${{label}}`;
+                document.getElementById(`percent-${{index}}`).textContent = `${{percent}}%`;
+            }});
+            updateCharts(currentPeriod);
+        }});
+    }});
+
+    // Set default: Lines metric and 1 Week period
+    document.querySelector('.metric-toggle button[data-metric="lines"]').click();
+    document.querySelector('.period-toggle:not(.metric-toggle) button[data-period="7"]').click();
     </script>
 </body>
 </html>"#,
         branch = branch,
         since_display = since_display,
         until_display = until_display,
-        total_weekly_json = total_weekly_json,
+        total_weekly_commits_json = total_weekly_commits_json,
+        total_weekly_lines_json = total_weekly_lines_json,
         contributors_json = contributors_json.join(","),
     );
 
