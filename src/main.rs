@@ -440,6 +440,8 @@ fn generate_html_report(
                     <button class="active" data-period="1">1 Day</button>
                     <button data-period="3">3 Days</button>
                     <button data-period="7">1 Week</button>
+                    <button data-period="30">1 Month</button>
+                    <button data-period="365">1 Year</button>
                 </div>
             </div>
             <div class="main-chart">
@@ -491,6 +493,15 @@ fn generate_html_report(
         return result;
     }}
 
+    // Fill data to match all dates from reference (for proper stacking)
+    function fillToAllDates(data, referenceDates) {{
+        const dataMap = new Map(data.map(d => [d.x, d.y]));
+        return referenceDates.map(date => ({{
+            x: date,
+            y: dataMap.get(date) || 0
+        }}));
+    }}
+
     // Calculate max for current period
     function getGlobalMax(period) {{
         const totalAgg = aggregateByPeriod(totalWeekly, period);
@@ -500,23 +511,26 @@ fn generate_html_report(
     let currentPeriod = 1;
     let mainChart, contribCharts = [];
 
-    // Main chart
+    // Main chart - stacked area with all contributors (reversed: smallest at bottom, largest at top)
     const mainCtx = document.getElementById('mainChart').getContext('2d');
+    const allDatesForPeriod = (period) => aggregateByPeriod(totalWeekly, period).map(d => d.x);
+    const contributorsReversed = [...contributors].reverse();
+    const mainDatasets = contributorsReversed.map((contrib, i) => ({{
+        label: contrib.name,
+        data: fillToAllDates(aggregateByPeriod(contrib.weekly, 1), allDatesForPeriod(1)),
+        borderColor: contrib.color,
+        backgroundColor: contrib.color + '80',
+        fill: 'origin',
+        tension: 0.2,
+        pointRadius: 0,
+        pointHoverRadius: 4,
+        pointHoverBackgroundColor: contrib.color,
+        borderWidth: 1
+    }}));
+
     mainChart = new Chart(mainCtx, {{
         type: 'line',
-        data: {{
-            datasets: [{{
-                data: aggregateByPeriod(totalWeekly, 1),
-                borderColor: '#58a6ff',
-                backgroundColor: 'rgba(88, 166, 255, 0.1)',
-                fill: true,
-                tension: 0,
-                pointRadius: 0,
-                pointHoverRadius: 6,
-                pointHoverBackgroundColor: '#58a6ff',
-                borderWidth: 2
-            }}]
-        }},
+        data: {{ datasets: mainDatasets }},
         options: {{
             responsive: true,
             maintainAspectRatio: false,
@@ -533,10 +547,10 @@ fn generate_html_report(
                     titleColor: '#c9d1d9',
                     bodyColor: '#c9d1d9',
                     padding: 12,
-                    displayColors: false,
+                    displayColors: true,
                     callbacks: {{
                         title: (items) => items[0]?.label || '',
-                        label: (item) => `${{item.parsed.y}} commits`
+                        label: (item) => `${{item.dataset.label}}: ${{item.parsed.y}} commits`
                     }}
                 }}
             }},
@@ -550,6 +564,7 @@ fn generate_html_report(
                     ticks: {{ color: '#8b949e' }}
                 }},
                 y: {{
+                    stacked: true,
                     beginAtZero: true,
                     grid: {{ color: '#21262d' }},
                     ticks: {{ color: '#8b949e', precision: 0 }}
@@ -584,7 +599,7 @@ fn generate_html_report(
         `;
         grid.appendChild(card);
 
-        const contribData = padData(aggregateByPeriod(contrib.weekly, 1), globalMinDate, globalMaxDate);
+        const contribData = fillToAllDates(aggregateByPeriod(contrib.weekly, 1), allDatesForPeriod(1));
 
         // Mini chart
         const chart = new Chart(document.getElementById(`chart-${{index}}`).getContext('2d'), {{
@@ -595,7 +610,7 @@ fn generate_html_report(
                     borderColor: contrib.color,
                     backgroundColor: contrib.color + '20',
                     fill: true,
-                    tension: 0,
+                    tension: 0.2,
                     pointRadius: 0,
                     pointHoverRadius: 5,
                     pointHoverBackgroundColor: contrib.color,
@@ -651,14 +666,17 @@ fn generate_html_report(
     function updateCharts(period) {{
         currentPeriod = period;
         const globalMax = getGlobalMax(period);
+        const dates = allDatesForPeriod(period);
 
-        // Update main chart
-        mainChart.data.datasets[0].data = aggregateByPeriod(totalWeekly, period);
+        // Update main chart (all contributor datasets)
+        contributorsReversed.forEach((contrib, i) => {{
+            mainChart.data.datasets[i].data = fillToAllDates(aggregateByPeriod(contrib.weekly, period), dates);
+        }});
         mainChart.update();
 
         // Update contributor charts
         contribCharts.forEach(({{ chart, contrib }}) => {{
-            const newData = padData(aggregateByPeriod(contrib.weekly, period), globalMinDate, globalMaxDate);
+            const newData = fillToAllDates(aggregateByPeriod(contrib.weekly, period), dates);
             chart.data.datasets[0].data = newData;
             chart.options.scales.y.max = globalMax;
             chart.options.scales.y.min = -globalMax * 0.05;
